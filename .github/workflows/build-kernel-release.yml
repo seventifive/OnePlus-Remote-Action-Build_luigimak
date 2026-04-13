@@ -267,8 +267,7 @@ jobs:
           merged_matrix=$(echo "$merged_matrix" | jq --arg resolved_sha "$resolved_sha" 'map(.ksu_resolved_hash = $resolved_sha)')
           
           # SUSFS hash fetch
-          SUSFS_REPO="https://gitlab.com/simonpunk/susfs4ksu.git"
-          PROJECT_ID="simonpunk%2fsusfs4ksu"
+          GITLAB_PROJECT_PATH="simonpunk/susfs4ksu"
           android_ver=$(echo "$merged_matrix" | jq -r '.[0].android_version')
           kernel_ver=$(echo "$merged_matrix"  | jq -r '.[0].kernel_version')
           susfs_key="${android_ver}-${kernel_ver}"
@@ -290,29 +289,32 @@ jobs:
           if [ "$susfs_enabled" = "true" ]; then
             echo "🔍 Resolving SUSFS hash for: $susfs_key (ref: $susfs_ref)"
             
+            # Single GraphQL query: fetch commit SHA
+            GL_QUERY="{ project(fullPath: \"${GITLAB_PROJECT_PATH}\") { repository { ch: commit(ref: \"${susfs_ref}\") { sha } } } }"
+
             MAX_RETRIES=3
             RETRY_COUNT=0
             RETRY_DELAY=5
             susfs_resolved=""
             
             until [ $RETRY_COUNT -ge $MAX_RETRIES ]; do
-              # We query the commit endpoint which accepts Branch, Tag, or SHA
-              RESULT=$(curl -s --fail \
-                "https://gitlab.com/api/v4/projects/${PROJECT_ID}/repository/commits/${susfs_ref}")
+              RESPONSE=$(curl -s --fail -G "https://gitlab.com/api/graphql" --data-urlencode "query=$GL_QUERY")
               EXIT_CODE=$?
               
-              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESULT" ]; then
-                susfs_resolved=$(echo "$RESULT" | jq -r '.id')
-                echo "  ✅ Resolved: $susfs_key → $susfs_resolved"
-                break
+              if [ $EXIT_CODE -eq 0 ] && [ -n "$RESPONSE" ]; then
+                susfs_resolved=$(echo "$RESPONSE" | jq -r '.data.project.repository.ch.sha // empty')
+                if [ -n "$susfs_resolved" ] && [ "$susfs_resolved" != "null" ]; then
+                  echo "  ✅ Resolved: $susfs_key → $susfs_resolved"
+                  break
+                fi
               fi
               
               RETRY_COUNT=$((RETRY_COUNT + 1))
-              echo "::warning::GitLab API failed (Attempt $RETRY_COUNT/$MAX_RETRIES). Retrying..."
+              echo "::warning::GitLab GraphQL API failed (Attempt $RETRY_COUNT/$MAX_RETRIES). Retrying..."
               sleep $RETRY_DELAY
             done
             
-            # Final Validation
+            # Final Validation — SUSFS hash
             if [ -z "$susfs_resolved" ] || [ "$susfs_resolved" = "null" ]; then
               echo "::error::Could not resolve SUSFS ref '$susfs_ref' for $susfs_key on GitLab."
               exit 1
